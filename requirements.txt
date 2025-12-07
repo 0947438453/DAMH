@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+
+requests
+
+numpy
+scikit-learn
+
+PyMuPDF
+python-docx
+pandas
+openpyxl
+tqdm
+
+sentence-transformers
