@@ -1,67 +1,73 @@
-from pathlib import Path
+# app/rag/vector_store.py
+from __future__ import annotations
 from typing import List, Tuple
+from pathlib import Path
 import numpy as np
 import pickle
-from sklearn.neighbors import NearestNeighbors
+
 from app.config import VECTOR_STORE_DIR
+from app.services.embeddings import embed_texts
 
 
 class SimpleVectorStore:
+    """
+    Lưu text + embedding ra đĩa, cho phép search theo cosine similarity.
+    """
+
     def __init__(self, name: str = "default"):
+        self.name = name
         VECTOR_STORE_DIR.mkdir(parents=True, exist_ok=True)
-        self.path: Path = VECTOR_STORE_DIR / f"{name}.pkl"
-        self.embeddings: np.ndarray | None = None
-        self.texts: List[str] = []
-        self.nn: NearestNeighbors | None = None
 
-        if self.path.exists():
-            self._load()
+        self.emb_path = VECTOR_STORE_DIR / f"{name}_embeddings.npy"
+        self.texts_path = VECTOR_STORE_DIR / f"{name}_texts.pkl"
 
-    def _load(self):
-        with open(self.path, "rb") as f:
-            obj = pickle.load(f)
-        self.embeddings = obj["embeddings"]
-        self.texts = obj["texts"]
-        if self.embeddings is not None and len(self.embeddings) > 0:
-            self.nn = NearestNeighbors(
-                n_neighbors=min(5, len(self.embeddings)),
-                metric="cosine",
-            )
-            self.nn.fit(self.embeddings)
+        if self.emb_path.exists() and self.texts_path.exists():
+            self.embeddings = np.load(self.emb_path)
+            with open(self.texts_path, "rb") as f:
+                self.texts: List[str] = pickle.load(f)
+        else:
+            self.embeddings = np.empty((0, 512), dtype="float32")
+            self.texts: List[str] = []
 
-    def save(self):
-        with open(self.path, "wb") as f:
-            pickle.dump(
-                {"embeddings": self.embeddings, "texts": self.texts},
-                f,
-            )
+    def _save(self) -> None:
+        np.save(self.emb_path, self.embeddings)
+        with open(self.texts_path, "wb") as f:
+            pickle.dump(self.texts, f)
 
-    def add(self, embeddings: np.ndarray, texts: List[str]):
-        if self.embeddings is None:
+    def add(self, embeddings: np.ndarray, texts: List[str]) -> None:
+        """
+        Thêm batch embedding + text.
+        embeddings.shape = (batch_size, dim)
+        """
+        if embeddings.size == 0:
+            return
+
+        if self.embeddings.size == 0:
             self.embeddings = embeddings
-            self.texts = texts
         else:
             self.embeddings = np.vstack([self.embeddings, embeddings])
-            self.texts.extend(texts)
 
-        self.nn = NearestNeighbors(
-            n_neighbors=min(5, len(self.embeddings)),
-            metric="cosine",
-        )
-        self.nn.fit(self.embeddings)
-        self.save()
+        self.texts.extend(texts)
+        self._save()
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Tuple[str, float]]:
+    def search(self, query: str, top_k: int = 5) -> List[Tuple[str, float]]:
         """
-        Trả về list (text, distance) – distance càng nhỏ càng giống
+        Tìm top_k đoạn text phù hợp với query, trả về [(text, score), ...]
         """
-        if self.nn is None or self.embeddings is None or len(self.embeddings) == 0:
+        if len(self.texts) == 0:
             return []
-        distances, indices = self.nn.kneighbors(
-            query_embedding.reshape(1, -1),
-            n_neighbors=min(top_k, len(self.embeddings)),
-        )
-        res: List[Tuple[str, float]] = []
-        for idx, dist in zip(indices[0], distances[0]):
-            res.append((self.texts[idx], float(dist)))
-        return res
+
+        query_emb = embed_texts([query])[0]  # (dim,)
+
+        # cosine similarity
+        emb = self.embeddings
+        emb_norm = emb / (np.linalg.norm(emb, axis=1, keepdims=True) + 1e-8)
+        q_norm = query_emb / (np.linalg.norm(query_emb) + 1e-8)
+
+        sims = emb_norm @ q_norm  # (n,)
+        idx = np.argsort(-sims)[:top_k]
+
+        results: List[Tuple[str, float]] = []
+        for i in idx:
+            results.append((self.texts[i], float(sims[i])))
+        return results
